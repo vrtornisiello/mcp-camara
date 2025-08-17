@@ -7,7 +7,17 @@ authors = [
     { name = "vrtornisiello", email = "vrtornisiello@gmail.com" }
 ]
 requires-python = ">=3.13"
-dependencies = []
+dependencies = [
+    "httpx>=0.28.1",
+    "loguru>=0.7.3",
+    "mcp>=1.13.0",
+    "pydantic>=2.11.7",
+]
+
+[dependency-groups]
+dev = [
+    "rich>=14.1.0",
+]
 
 [project.scripts]
 mcp-camara = "mcp_camara:main"
