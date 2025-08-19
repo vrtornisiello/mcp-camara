@@ -29,14 +29,15 @@ def get_endpoints(openapi_spec: dict[str, Any]) -> list[Endpoint]:
         for method, method_details in path_methods.items():
 
             parameters: list[dict] = []
-            for param in method_details.get("parameters", []):
+            method_parameters: list[dict] = method_details.get("parameters", [])
+            for param in method_parameters:
                 if param.get("in") in {"query", "path"}:
                     parameters.append(Parameter(**param))
 
             endpoint = Endpoint(
                 path=path,
                 method=method.upper(),
-                description=method_details.get("description"),
+                description=method_details.get("description") or method_details.get("summary"),
                 parameters=parameters
             )
 
