@@ -52,11 +52,16 @@ def create_tools(endpoints: list[Endpoint]) -> list[types.Tool]:
         required = []
 
         for parameter in endpoint.parameters:
-            properties[parameter.name] = {
+            props = {
                 "type": parameter.schema.type,
                 "description": parameter.description,
-                "format": parameter.schema.format,
             }
+
+            if parameter.schema.format:
+                props["format"] = parameter.schema.format
+
+            properties[parameter.name] = props
+
             if parameter.required:
                 required.append(parameter.name)
 

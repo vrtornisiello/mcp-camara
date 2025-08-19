@@ -37,8 +37,8 @@ async def handle_call_tool(name: str, arguments: dict[str, Any]) -> list[types.T
     tool = tools.get(name)
 
     if tool is None:
-        logger.warning(f"Called unknown tool {name}.")
-        return types.TextContent(text=f"Unknown tool {name}")
+        logger.warning(f"Called unknown tool `{name}`.")
+        return [types.TextContent(type="text", text=f"Called unknown tool `{name}`")]
 
     method_map: dict[str, Callable[..., httpx.Response]] = {
         "GET": httpx.get,
@@ -49,20 +49,22 @@ async def handle_call_tool(name: str, arguments: dict[str, Any]) -> list[types.T
     }
 
     try:
+        x /= 1
         request_method = method_map[tool.meta["method"]]
 
         path: str = tool.meta["path"]
 
-        for path_param in re.findall(r"\{([^}]+)\}"):
+        for path_param in re.findall(r"\{([^}]+)\}", path):
             if param_value := arguments.get(path_param):
-                path.replace(f"{{{path_param}}}", str(param_value))
+                path = path.replace(f"{{{path_param}}}", str(param_value))
+                del arguments[path_param]
 
-        response = request_method(url=f"{BASE_URL}/{path}", params=arguments)
+        response = request_method(url=f"{BASE_URL}{path}", params=arguments)
         response.raise_for_status()
-        return types.TextContent(text=json.dumps(response.json()))
+        return [types.TextContent(type="text", text=json.dumps(response.json(), ensure_ascii=False, indent=2))]
     except Exception as e:
-        logger.exception(f"Error calling tool {name}:")
-        return types.TextContent(text=f"Error calling tool {name}: {e}")
+        logger.exception(f"Error calling tool `{name}`:")
+        return [types.TextContent(type="text", text=f"Error calling tool `{name}`:\n{e}")]
 
 
 async def run_server():
