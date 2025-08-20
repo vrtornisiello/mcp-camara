@@ -1,17 +1,13 @@
 import json
 import re
-from collections.abc import Callable
 from typing import Any
 
 import httpx
-import mcp.server.stdio
-import mcp.types as types
 from loguru import logger
-from mcp.server.lowlevel import NotificationOptions, Server
-from mcp.server.models import InitializationOptions
+from mcp.server.fastmcp import FastMCP
 
+from mcp_camara.models import Endpoint, EndpointSummary
 from mcp_camara.parser import get_endpoints, load_openapi_spec
-from mcp_camara.tools import create_tools
 
 BASE_URL = "https://dadosabertos.camara.leg.br/api/v2"
 SPEC_URL = f"{BASE_URL}/api-docs"
@@ -20,71 +16,124 @@ spec = load_openapi_spec(SPEC_URL)
 
 endpoints = get_endpoints(spec)
 
-tools = {tool.name: tool for tool in create_tools(endpoints)}
+endpoints_summary = [
+    EndpointSummary(
+        path=endpoint.path,
+        method=endpoint.method,
+        description=endpoint.description
+    ) for endpoint in endpoints
+]
 
-server = Server(name="mcp-camara", version="0.1.0")
+endpoints_mapping = {
+    f"{endpoint.method}:{endpoint.path}": endpoint
+    for endpoint in endpoints
+}
+
+mcp = FastMCP(name="mcp-camara")
 
 
-@server.list_tools()
-async def handle_list_tools() -> list[types.Tool]:
-    return list(tools.values())
+@mcp.tool()
+async def list_endpoints() -> list[EndpointSummary]:
+    """Lists available endpoints for the Brazilian Chamber of Deputies API.
+
+    This is the primary discovery tool to understand the API's capabilities.
+    It returns a list of all available operations, including the `path`, `method`,
+    and `description` for each.
+
+    Use the `path` and `method` from an endpoint in this list to either fetch
+    its detailed parameter schema with the `get_endpoint_schema` tool or to
+    execute it with the `call_endpoint` tool.
+
+    Returns:
+        list[EndpointSummary]: A list of `EndpointSummary` objects, each containing
+            an endpoint `path`, `method` and `description`.
+    """
+    return endpoints_summary
 
 
-@server.call_tool()
-async def handle_call_tool(name: str, arguments: dict[str, Any]) -> list[types.TextContent]:
-    tool = tools.get(name)
+@mcp.tool()
+async def get_endpoint_schema(path: str, method: str) -> Endpoint | str:
+    """Retrieves the detailed schema for a single API endpoint.
 
-    if tool is None:
-        logger.warning(f"Called unknown tool `{name}`.")
-        return [types.TextContent(type="text", text=f"Called unknown tool `{name}`")]
+    Use this tool to understand exactly how to call a specific endpoint,
+    including its required and optional parameters.
 
-    method_map: dict[str, Callable[..., httpx.Response]] = {
-        "GET": httpx.get,
-        "POST": httpx.post,
-        "PUT": httpx.put,
-        "PATCH": httpx.patch,
-        "DELETE": httpx.delete
-    }
+    The `path` and `method` must be a valid combination obtained from the
+    `list_api_endpoints` tool.
+
+    The returned `Endpoint` object contains the parameter definitions needed
+    to build the `params` argument for the `call_endpoint` tool.
+
+    Args:
+        path (str): The endpoint path (e.g., '/deputados/{id}').
+        method (str): The endpoint method (e.g., 'GET').
+
+    Returns:
+        Endpoint: An `Endpoint` object, containing detailed information
+            about the endpoint parameters.
+    """
+    key = f"{method.upper()}:{path}"
+
+    endpoint = endpoints_mapping.get(key)
+
+    if endpoint is None:
+        return (
+            f"Endpoint '{method} {path}' not found. "
+            "Please use the `list_endpoints` tool to find a valid path and method combination."
+        )
+
+    return endpoint
+
+
+@mcp.tool()
+async def call_endpoint(path: str, method: str, params: dict[str, Any]) -> str:
+    """Calls a specific endpoint of the Brazilian Chamber of Deputies API.
+
+    This is the final tool in the workflow, used to retrieve the actual data.
+    The `path` and `method` must be a valid combination obtained
+    from the `list_api_endpoints` tool.
+
+    The `params` dictionary must contain all required parameters for the chosen endpoint,
+    as defined by the `get_endpoint_schema` tool. Both path parameters and query parameters
+    are passed together in this single dictionary.
+
+    Args:
+        path (str): The endpoint path (e.g., '/deputados/{id}').
+        method (str): The HTTP method (e.g., 'GET').
+        params (dict[str, Any]): A dictionary of parameters for the endpoint.
+
+    Returns:
+        str: A JSON string containing the API response.
+    """
+    method_upper = method.upper()
+
+    if method_upper != "GET":
+        return (
+            f"Invalid method: `{method}`. Only 'GET' is supported."
+            "Please use the `list_endpoints` tool to find a valid path and method combination."
+        )
+
+    for path_param in re.findall(r"\{([^{}]+)\}", path):
+        if param_value := params.get(path_param):
+            path = path.replace(f"{{{path_param}}}", str(param_value))
+            del params[path_param]
 
     try:
-        request_method = method_map[tool.meta["method"]]
-
-        path: str = tool.meta["path"]
-
-        for path_param in re.findall(r"\{([^}]+)\}", path):
-            if param_value := arguments.get(path_param):
-                path = path.replace(f"{{{path_param}}}", str(param_value))
-                del arguments[path_param]
-
-        response = request_method(url=f"{BASE_URL}{path}", params=arguments)
-        response.raise_for_status()
-        return [types.TextContent(type="text", text=json.dumps(response.json(), ensure_ascii=False, indent=2))]
+        async with httpx.AsyncClient() as client:
+            response = await client.request(
+                method=method_upper,
+                url=f"{BASE_URL}{path}",
+                params=params
+            )
+            response.raise_for_status()
+        return json.dumps(response.json(), ensure_ascii=False, indent=2)
     except Exception as e:
-        logger.exception(f"Error calling tool `{name}`:")
-        return [types.TextContent(type="text", text=f"Error calling tool `{name}`:\n{e}")]
-
-
-async def run_server():
-    logger.info("Running server...")
-    async with mcp.server.stdio.stdio_server() as (read_stream, write_stream):
-        await server.run(
-            read_stream,
-            write_stream,
-            InitializationOptions(
-                server_name="mcp-camara",
-                server_version="0.1.0",
-                capabilities=server.get_capabilities(
-                    notification_options=NotificationOptions(),
-                    experimental_capabilities={},
-                ),
-            ),
-        )
+        logger.exception("Error calling tool `call_endpoint`:")
+        return f"Error calling tool `call_endpoint`:\n {e}"
 
 
 def main():
-    import asyncio
-
-    asyncio.run(run_server())
+    mcp.run(transport="stdio")
 
 
 if __name__ == "__main__":
