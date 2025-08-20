@@ -28,7 +28,6 @@ server = Server(name="mcp-camara", version="0.1.0")
 
 @server.list_tools()
 async def handle_list_tools() -> list[types.Tool]:
-    """List available tools."""
     return list(tools.values())
 
 
@@ -49,7 +48,6 @@ async def handle_call_tool(name: str, arguments: dict[str, Any]) -> list[types.T
     }
 
     try:
-        x /= 1
         request_method = method_map[tool.meta["method"]]
 
         path: str = tool.meta["path"]
