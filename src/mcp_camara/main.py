@@ -133,6 +133,7 @@ async def call_endpoint(path: str, method: str, params: dict[str, Any]) -> str:
 
 
 def main():
+    logger.info("Running server...")
     mcp.run(transport="stdio")
 
 
