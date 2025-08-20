@@ -2,6 +2,7 @@
 # https://github.com/NophaieViscente/singularize_pluralize/tree/master
 
 import re
+
 from unidecode import unidecode
 
 

@@ -10,9 +10,8 @@ from loguru import logger
 from mcp.server.lowlevel import NotificationOptions, Server
 from mcp.server.models import InitializationOptions
 
-from mcp_camara.parser import load_openapi_spec, get_endpoints
+from mcp_camara.parser import get_endpoints, load_openapi_spec
 from mcp_camara.tools import create_tools
-
 
 BASE_URL = "https://dadosabertos.camara.leg.br/api/v2"
 SPEC_URL = f"{BASE_URL}/api-docs"
