@@ -127,9 +127,17 @@ async def call_endpoint(path: str, method: str, params: dict[str, Any]) -> str:
             )
             response.raise_for_status()
         return json.dumps(response.json(), ensure_ascii=False, indent=2)
+    except httpx.HTTPStatusError as e:
+        logger.exception("Error calling tool `call_endpoint`:")
+        if response.status_code == httpx.codes.BAD_REQUEST:
+            return (
+                f"Client error '400 Bad Request' for url {e.request.url}\n"
+                "Check the endpoint schema using the `get_endpoint_schema` tool."
+            )
+        return f"Error calling tool `call_endpoint`:\n{e}"
     except Exception as e:
         logger.exception("Error calling tool `call_endpoint`:")
-        return f"Error calling tool `call_endpoint`:\n {e}"
+        return f"Error calling tool `call_endpoint`:\n{e}"
 
 
 def main():
