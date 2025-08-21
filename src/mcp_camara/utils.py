@@ -1,5 +1,4 @@
-# This file was copied from:
-# https://github.com/NophaieViscente/singularize_pluralize/tree/master
+# NOTE: This file was copied from https://github.com/NophaieViscente/singularize_pluralize/tree/master
 
 import re
 
