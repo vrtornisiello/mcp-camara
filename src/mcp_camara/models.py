@@ -1,6 +1,6 @@
-from typing import Any, Optional
+from typing import Any, Literal, Optional, Self
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, model_validator
 
 
 class ParameterSchema(BaseModel):
@@ -32,3 +32,20 @@ class Endpoint(EndpointSummary):
     """Represents a full API endpoint, including its summary and all of its parameters."""
 
     parameters: list[Parameter] = Field(description="A list of parameters that the endpoint accepts.")
+
+
+class APIResponse(BaseModel):
+    """A standardized response object for all tool outputs.
+
+    This model provides a consistent structure for returning data from tools,
+    clearly separating successful results from error information.
+    """
+    status: Literal["success", "error"] = Field(description="Indicates whether the tool call was successful.")
+    results: Optional[Any] = Field(default=None, description="The successful result of the tool call. Only present if status is 'success'.")
+    error_details: Optional[dict[str, Any]] = Field(default=None, description="A dictionary containing error details. Only present if status is 'error'.")
+
+    @model_validator(mode="after")
+    def check_passwords_match(self) -> Self:
+        if (self.results is None) ^ (self.error_details is None):
+            return self
+        raise ValueError("Only one of 'results' or 'error_details' should be set")
