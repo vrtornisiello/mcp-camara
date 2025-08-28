@@ -1,5 +1,5 @@
 import re
-from datetime import date, timedelta
+from datetime import date
 from typing import Any
 
 import httpx
@@ -147,20 +147,10 @@ async def call_endpoint(path: str, method: str, params: dict[str, Any]) -> APIRe
                 }
             )
         else:
-            return APIResponse(
-                status="error",
-                error_details={
-                    "message": f"Error calling tool `call_endpoint`:\n{e}"
-                }
-            )
+            return APIResponse(status="error", error_details={"message": str(e)})
     except Exception as e:
         logger.exception("Error calling tool `call_endpoint`:")
-        return APIResponse(
-            status="error",
-            error_details={
-                "message": f"Error calling tool `call_endpoint`:\n{e}"
-            }
-        )
+        return APIResponse(status="error", error_details={"message": str(e)})
 
 
 @mcp.tool()
@@ -260,22 +250,15 @@ async def get_deputy_expenses(
 
 
 @mcp.tool()
-async def get_bills_by_author(
-    author_name: str | None = None,
-    deputy_id: int | None = None,
-    initial_date: str | None = None,
-    end_date: str | None = None,
-) -> APIResponse:
+async def get_bills_by_deputy(deputy_id: int, years: list[str] | None = None) -> APIResponse:
     """Retrieves a list of bills (proposições) by a specific author.
 
-    You must provide either `author_name` or `deputy_id`.
-    If no date parameters are provided, it defaults to bills from the last 365 days.
+    This is a helper tool that abstracts the process of querying bills for a deputy.
 
     Args:
-        author_name (str | None): The name of the bill's author.
-        deputy_id (int | None): The ID of the deputy authoring the bill.
-        initial_date (str | None): The start date for the search, in YYYY-MM-DD format.
-        end_date (str | None): The end date for the search, in YYYY-MM-DD format.
+        deputy_id (int): The ID of the deputy authoring the bill.
+        years (list[str] | None): One or more years for when bills were presented.
+            If set to None, the current year is used. Defaults to None.
 
     Returns:
         APIResponse: An APIResponse object containing a list of bills on success, or an error message.
@@ -284,24 +267,17 @@ async def get_bills_by_author(
 
     if deputy_id:
         params["idDeputadoAutor"] = deputy_id
-    elif author_name:
-        params["autor"] = author_name
     else:
         return APIResponse(
             status="error",
-            error_details={"message": "You must provide either `author_name` or `deputy_id`."}
+            error_details={"message": "You must provide `deputy_id`."}
         )
 
-    if not initial_date and not end_date:
-        today = date.today()
-        one_year_ago = today - timedelta(days=365)
-        params["dataInicio"] = one_year_ago.strftime("%Y-%m-%d")
-        params["dataFim"] = today.strftime("%Y-%m-%d")
+    if years:
+        params["ano"] = ",".join(years)
     else:
-        if initial_date:
-            params["dataInicio"] = initial_date
-        if end_date:
-            params["dataFim"] = end_date
+        current_year = date.today().year
+        params["ano"] = current_year
 
     return await call_endpoint(
         path="/proposicoes",
