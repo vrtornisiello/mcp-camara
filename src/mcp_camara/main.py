@@ -1,17 +1,13 @@
-import json
 import re
-from collections.abc import Callable
+from datetime import date
 from typing import Any
 
 import httpx
-import mcp.server.stdio
-import mcp.types as types
 from loguru import logger
-from mcp.server.lowlevel import NotificationOptions, Server
-from mcp.server.models import InitializationOptions
+from mcp.server.fastmcp import FastMCP
 
+from mcp_camara.models import APIResponse, EndpointSummary
 from mcp_camara.parser import get_endpoints, load_openapi_spec
-from mcp_camara.tools import create_tools
 
 BASE_URL = "https://dadosabertos.camara.leg.br/api/v2"
 SPEC_URL = f"{BASE_URL}/api-docs"
@@ -20,71 +16,279 @@ spec = load_openapi_spec(SPEC_URL)
 
 endpoints = get_endpoints(spec)
 
-tools = {tool.name: tool for tool in create_tools(endpoints)}
+endpoints_summary = [
+    EndpointSummary(
+        path=endpoint.path,
+        method=endpoint.method,
+        description=endpoint.description
+    ) for endpoint in endpoints
+]
 
-server = Server(name="mcp-camara", version="0.1.0")
+endpoints_mapping = {
+    f"{endpoint.method}:{endpoint.path}": endpoint
+    for endpoint in endpoints
+}
+
+mcp = FastMCP(name="mcp-camara")
 
 
-@server.list_tools()
-async def handle_list_tools() -> list[types.Tool]:
-    return list(tools.values())
+@mcp.tool()
+async def list_endpoints() -> APIResponse:
+    """Lists available endpoints for the Brazilian Chamber of Deputies API.
+
+    This is the primary discovery tool to understand the API's capabilities.
+    It returns a list of all available operations, including the `path`, `method`,
+    and `description` for each.
+
+    Use the `path` and `method` from an endpoint in this list to either fetch
+    its detailed parameter schema with the `get_endpoint_schema` tool or to
+    execute it with the `call_endpoint` tool.
+
+    Returns:
+        APIResponse: An APIResponse object containing a list of `EndpointSummary` objects.
+    """
+    return APIResponse(status="success", results=endpoints_summary)
 
 
-@server.call_tool()
-async def handle_call_tool(name: str, arguments: dict[str, Any]) -> list[types.TextContent]:
-    tool = tools.get(name)
+@mcp.tool()
+async def get_endpoint_schema(path: str, method: str) -> APIResponse:
+    """Retrieves the detailed schema for a single API endpoint.
 
-    if tool is None:
-        logger.warning(f"Called unknown tool `{name}`.")
-        return [types.TextContent(type="text", text=f"Called unknown tool `{name}`")]
+    Use this tool to understand exactly how to call a specific endpoint,
+    including its required and optional parameters.
 
-    method_map: dict[str, Callable[..., httpx.Response]] = {
-        "GET": httpx.get,
-        "POST": httpx.post,
-        "PUT": httpx.put,
-        "PATCH": httpx.patch,
-        "DELETE": httpx.delete
-    }
+    The `path` and `method` must be a valid combination obtained from the
+    `list_api_endpoints` tool.
+
+    Args:
+        path (str): The endpoint path (e.g., '/deputados/{id}').
+        method (str): The endpoint method (e.g., 'GET').
+
+    Returns:
+        APIResponse: An APIResponse object containing the Endpoint schema on success, or an error message.
+    """
+    key = f"{method.upper()}:{path}"
+
+    endpoint = endpoints_mapping.get(key)
+
+    if endpoint is None:
+        return APIResponse(
+            status="error",
+            error_details={
+                "message": (
+                    f"Endpoint '{method} {path}' not found. "
+                    "Please use the `list_endpoints` tool to find a valid path and method combination."
+                )
+            }
+        )
+
+    return APIResponse(status="success", results=endpoint)
+
+
+@mcp.tool()
+async def call_endpoint(path: str, method: str, params: dict[str, Any]) -> APIResponse:
+    """Calls a specific endpoint of the Brazilian Chamber of Deputies API.
+
+    This is the final tool in the workflow, used to retrieve the actual data.
+    The `path` and `method` must be a valid combination obtained
+    from the `list_api_endpoints` tool.
+
+    The `params` dictionary must contain all required parameters for the chosen endpoint,
+    as defined by the `get_endpoint_schema` tool. Both path parameters and query parameters
+    are passed together in this single dictionary.
+
+    Args:
+        path (str): The endpoint path (e.g., '/deputados/{id}').
+        method (str): The HTTP method (e.g., 'GET').
+        params (dict[str, Any]): A dictionary of parameters for the endpoint.
+
+    Returns:
+        APIResponse: An APIResponse object containing the requested data on success, or an error message.
+    """
+    method_upper = method.upper()
+
+    if method_upper != "GET":
+        return APIResponse(
+            status="error",
+            error_details={
+                "message": (
+                    f"Invalid method: `{method}`. Only 'GET' is supported."
+                    "Please use the `list_endpoints` tool to find a valid path and method combination."
+                )
+            }
+        )
+
+    for path_param in re.findall(r"\{([^{}]+)\}", path):
+        if param_value := params.get(path_param):
+            path = path.replace(f"{{{path_param}}}", str(param_value))
+            del params[path_param]
 
     try:
-        request_method = method_map[tool.meta["method"]]
+        async with httpx.AsyncClient() as client:
+            response = await client.request(
+                method=method_upper,
+                url=f"{BASE_URL}{path}",
+                params=params
+            )
+            response.raise_for_status()
 
-        path: str = tool.meta["path"]
-
-        for path_param in re.findall(r"\{([^}]+)\}", path):
-            if param_value := arguments.get(path_param):
-                path = path.replace(f"{{{path_param}}}", str(param_value))
-                del arguments[path_param]
-
-        response = request_method(url=f"{BASE_URL}{path}", params=arguments)
-        response.raise_for_status()
-        return [types.TextContent(type="text", text=json.dumps(response.json(), ensure_ascii=False, indent=2))]
+        return APIResponse(status="success", results=response.json())
+    except httpx.HTTPStatusError as e:
+        logger.exception("Error calling tool `call_endpoint`:")
+        if e.response.status_code == httpx.codes.BAD_REQUEST:
+            return APIResponse(
+                status="error",
+                error_details={
+                    "status_code": "400 Bad Request",
+                    "message": (
+                        f"Client error '400 Bad Request' for url {e.request.url}. "
+                        "Check the endpoint schema using the `get_endpoint_schema` tool."
+                    )
+                }
+            )
+        else:
+            return APIResponse(status="error", error_details={"message": str(e)})
     except Exception as e:
-        logger.exception(f"Error calling tool `{name}`:")
-        return [types.TextContent(type="text", text=f"Error calling tool `{name}`:\n{e}")]
+        logger.exception("Error calling tool `call_endpoint`:")
+        return APIResponse(status="error", error_details={"message": str(e)})
 
 
-async def run_server():
-    logger.info("Running server...")
-    async with mcp.server.stdio.stdio_server() as (read_stream, write_stream):
-        await server.run(
-            read_stream,
-            write_stream,
-            InitializationOptions(
-                server_name="mcp-camara",
-                server_version="0.1.0",
-                capabilities=server.get_capabilities(
-                    notification_options=NotificationOptions(),
-                    experimental_capabilities={},
-                ),
-            ),
+@mcp.tool()
+async def get_deputy_by_name(name: str) -> APIResponse:
+    """Retrieves a list of deputies by name.
+
+    This is a helper tool that abstracts the process of querying for a deputy by name.
+
+    Args:
+        name (str): The name of the deputy to search for.
+
+    Returns:
+        APIResponse: An APIResponse object containing a list of deputies on success, or an error message.
+    """
+    return await call_endpoint(
+        path="/deputados",
+        method="GET",
+        params={"nome": name},
+    )
+
+
+@mcp.tool()
+async def get_deputy_expenses(
+    name: str | None = None,
+    id: int | None = None,
+    year: int | None = None,
+    month: int | None = None
+) -> APIResponse:
+    """Gets the expenses for a single deputy, specified by name or ID.
+
+    This tool finds a deputy by their name or ID.
+    You must provide either `name` or `id`. If `name` is used and multiple
+    deputies are found, it will return an error asking for a more specific name or an ID.
+    Optional `year` and `month` parameters can be used to filter expenses.
+
+    Args:
+        name (str | None): The full or partial name of the deputy.
+        id (int | None): The unique ID of the deputy.
+        year (int | None): The year to filter expenses by.
+        month (int | None): The month to filter expenses by.
+
+    Returns:
+        APIResponse: An APIResponse object containing the deputy's expense data on success, or an error message.
+    """
+    deputy_id = id
+
+    if deputy_id is None:
+        if not name:
+            return APIResponse(
+                status="error",
+                error_details={
+                    "message": "You must provide either a `name` or an `id`."
+                }
+            )
+
+        deputies_response = await get_deputy_by_name(name)
+
+        if deputies_response.status == "error":
+            return deputies_response
+
+        deputies = deputies_response.results.get("dados", [])
+
+        if not deputies:
+            return APIResponse(
+                status="error",
+                error_details={
+                    "message": f"No deputy found with name containing '{name}'."
+                }
+            )
+
+        if len(deputies) > 1:
+            suggestions = [f"'{d['nome']}' (ID: {d['id']})" for d in deputies]
+            return APIResponse(
+                status="error",
+                error_details={
+                    "message": (
+                        f"Multiple deputies found for '{name}'. "
+                        f"Please be more specific or use an ID. Suggestions: {', '.join(suggestions)}."
+                    )
+                }
+            )
+
+        deputy_id = deputies[0]["id"]
+
+    params = {}
+
+    if year:
+        params["ano"] = year
+    if month:
+        params["mes"] = month
+
+    return await call_endpoint(
+        path=f"/deputados/{deputy_id}/despesas",
+        method="GET",
+        params=params,
+    )
+
+
+@mcp.tool()
+async def get_bills_by_deputy(deputy_id: int, years: list[str] | None = None) -> APIResponse:
+    """Retrieves a list of bills (proposições) by a specific author.
+
+    This is a helper tool that abstracts the process of querying bills for a deputy.
+
+    Args:
+        deputy_id (int): The ID of the deputy authoring the bill.
+        years (list[str] | None): One or more years for when bills were presented.
+            If set to None, the current year is used. Defaults to None.
+
+    Returns:
+        APIResponse: An APIResponse object containing a list of bills on success, or an error message.
+    """
+    params = {}
+
+    if deputy_id:
+        params["idDeputadoAutor"] = deputy_id
+    else:
+        return APIResponse(
+            status="error",
+            error_details={"message": "You must provide `deputy_id`."}
         )
+
+    if years:
+        params["ano"] = ",".join(years)
+    else:
+        current_year = date.today().year
+        params["ano"] = current_year
+
+    return await call_endpoint(
+        path="/proposicoes",
+        method="GET",
+        params=params,
+    )
 
 
 def main():
-    import asyncio
-
-    asyncio.run(run_server())
+    logger.info("Running server...")
+    mcp.run(transport="stdio")
 
 
 if __name__ == "__main__":
